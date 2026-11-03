@@ -38,6 +38,15 @@ public class EnemyManager : IDisposable
         GC.SuppressFinalize(this);
     }
 
+    public static bool CanRemoveBasePit(EnemyDFGroundSystem enemySystem, int baseId)
+    {
+        var bases = enemySystem.bases;
+        if (baseId <= 0 || baseId >= bases.buffer.Length) return false;
+
+        var dfgBase = bases.buffer[baseId];
+        return dfgBase?.id == baseId && dfgBase.ruinId > 0 && enemySystem.CheckBaseCanRemoved(baseId) == 0;
+    }
+
     public void BroadcastBaseStatusPackets(EnemyDFGroundSystem enemySystem, long gameTick)
     {
         var factoryIndex = enemySystem.factory.index;

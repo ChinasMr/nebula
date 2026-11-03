@@ -5,6 +5,7 @@ using HarmonyLib;
 using NebulaModel.Logger;
 using NebulaModel.Packets.Combat.GroundEnemy;
 using NebulaWorld;
+using NebulaWorld.Combat;
 
 #endregion
 
@@ -153,6 +154,11 @@ internal class EnemyDFGroundSystem_Patch
                 var packet = new DFGRemoveBasePitPacket(__instance.factory.planetId, baseId);
                 if (Multiplayer.Session.IsServer)
                 {
+                    if (!EnemyManager.CanRemoveBasePit(__instance, baseId))
+                    {
+                        Log.Warn($"Reject RemoveBasePit: planet={__instance.factory.planetId}, base={baseId} still has buildings or units");
+                        return false;
+                    }
                     Multiplayer.Session.Network.SendPacketToStar(packet, __instance.factory.planet.star.id);
                     return true;
                 }
@@ -166,6 +172,18 @@ internal class EnemyDFGroundSystem_Patch
         }
         // Is it possible to go here in vanilla?
         __instance.factory.RemoveRuinWithComponet(pitRuinId);
+        return false;
+    }
+
+    [HarmonyPrefix]
+    [HarmonyPatch(nameof(EnemyDFGroundSystem.RemoveBase))]
+    public static bool RemoveBase_Prefix(EnemyDFGroundSystem __instance, int baseId)
+    {
+        if (!Multiplayer.IsActive || Multiplayer.Session.IsClient) return true;
+        if (EnemyManager.CanRemoveBasePit(__instance, baseId)) return true;
+
+        // Other build paths, such as geothermal placement, must obey the same invariant.
+        Log.Warn($"Reject RemoveBase: planet={__instance.factory.planetId}, base={baseId} still has buildings or units");
         return false;
     }
 
@@ -211,29 +229,47 @@ internal class EnemyDFGroundSystem_Patch
     }
 
     [HarmonyPrefix]
+    [HarmonyPatch(nameof(EnemyDFGroundSystem.ClearReferencesOnEnemyRemove))]
+    public static bool ClearReferencesOnEnemyRemove_Prefix(EnemyDFGroundSystem __instance, int removingEnemyId)
+    {
+        if (!Multiplayer.IsActive) return true;
+
+        ref var enemy = ref __instance.factory.enemyPool[removingEnemyId];
+        var owner = enemy.owner;
+        var baseBuffer = __instance.bases.buffer;
+        if (owner <= 0 || (owner < baseBuffer.Length && baseBuffer[owner] != null)) return true;
+
+        // The base-owned reference cleanup cannot run without its base. Complete the
+        // remaining global cleanup and let RemoveEnemyWithComponents remove every component.
+        if (!enemy.dynamic)
+        {
+            __instance.factory.powerSystem.SetGeothermalAffectStrength(0, removingEnemyId);
+        }
+        __instance.factory.defenseSystem.RemoveGlobalTargets(ETargetType.Enemy, removingEnemyId);
+        return false;
+    }
+
+    [HarmonyPrefix]
     [HarmonyPatch(nameof(EnemyDFGroundSystem.KeyTickLogic))]
     public static void KeyTickLogic_Prefix(EnemyDFGroundSystem __instance)
     {
         if (!Multiplayer.IsActive || Multiplayer.Session.IsServer) return;
 
-        // Fix NRE in EnemyDFGroundSystem.KeyTickLogic (System.Int64 time);(IL_0929)
-        var cursor = __instance.builders.cursor;
-        var buffer = __instance.builders.buffer;
+        // Remove the complete enemy records when their owner base is already gone.
+        // SetEmpty alone leaves connectors, replicators, turrets and units behind.
         var baseBuffer = __instance.bases.buffer;
         var enemyPool = __instance.factory.enemyPool;
-        for (var builderId = 1; builderId < cursor; builderId++)
+        using (Multiplayer.Session.Combat.IsIncomingRequest.On())
         {
-            ref var builder = ref buffer[builderId];
-            if (builder.id == builderId)
+            for (var enemyId = 1; enemyId < __instance.factory.enemyCursor; enemyId++)
             {
-                if (baseBuffer[enemyPool[builder.enemyId].owner] == null)
-                {
-                    var msg = $"Remove EnemyDFGroundSystem enemy[{builder.enemyId}]: owner = {enemyPool[builder.enemyId].owner}";
-                    Log.WarnInform(msg);
+                ref var enemy = ref enemyPool[enemyId];
+                var owner = enemy.owner;
+                if (enemy.id != enemyId || owner <= 0) continue;
+                if (owner < baseBuffer.Length && baseBuffer[owner] != null) continue;
 
-                    __instance.factory.enemyPool[builder.enemyId].SetEmpty();
-                    __instance.builders.Remove(builderId);
-                }
+                Log.WarnInform($"Remove orphaned EnemyDFGroundSystem enemy[{enemyId}]: owner = {owner}");
+                __instance.factory.RemoveEnemyFinal(enemyId);
             }
         }
     }

@@ -1,10 +1,12 @@
 ﻿#region
 
 using NebulaAPI.Packets;
+using NebulaModel.Logger;
 using NebulaModel.Networking;
 using NebulaModel.Packets;
 using NebulaModel.Packets.Combat.GroundEnemy;
 using NebulaWorld;
+using NebulaWorld.Combat;
 
 #endregion
 
@@ -20,6 +22,13 @@ public class DFGRemoveBasePitProcessor : PacketProcessor<DFGRemoveBasePitPacket>
 
         if (IsHost) // Forward and approve the active base event
         {
+            // RemoveBase only deletes the core. Validate on the authoritative factory
+            // before forwarding so clients cannot approve removal with stale state.
+            if (!EnemyManager.CanRemoveBasePit(factory.enemySystem, packet.BaseId))
+            {
+                Log.Warn($"Reject DFGRemoveBasePitPacket: planet={packet.PlanetId}, base={packet.BaseId} still has buildings or units");
+                return;
+            }
             Multiplayer.Session.Network.SendPacketToStar(packet, factory.planet.star.id);
         }
 
